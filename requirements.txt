@@ -5,3 +5,4 @@ yfinance
 pandas_ta
 plotly
 pyarrow
+numba<0.62
