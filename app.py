@@ -1,12 +1,38 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
 import ftplib
 import io
+
+def calculate_adx(df, period=14):
+    df = df.copy()
+
+    df['TR'] = pd.concat([
+        df['High'] - df['Low'],
+        abs(df['High'] - df['Close'].shift()),
+        abs(df['Low'] - df['Close'].shift())
+    ], axis=1).max(axis=1)
+
+    df['+DM'] = (df['High'] - df['High'].shift()).clip(lower=0)
+    df['-DM'] = (df['Low'].shift() - df['Low']).clip(lower=0)
+
+    df['+DM'] = df['+DM'].where(df['+DM'] > df['-DM'], 0)
+    df['-DM'] = df['-DM'].where(df['-DM'] > df['+DM'], 0)
+
+    tr_smooth = df['TR'].rolling(period).mean()
+    plus_dm_smooth = df['+DM'].rolling(period).mean()
+    minus_dm_smooth = df['-DM'].rolling(period).mean()
+
+    df['+DI'] = 100 * (plus_dm_smooth / tr_smooth)
+    df['-DI'] = 100 * (minus_dm_smooth / tr_smooth)
+
+    df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])) * 100
+    df['ADX'] = df['DX'].rolling(period).mean()
+
+    return df
 
 # ==========================================
 # DEVELOPER SETTINGS
@@ -176,8 +202,9 @@ with tab1:
                 ema_s = float(latest['EMA_Slow'])
                 sma_200 = float(latest['SMA_200']) if not pd.isna(latest['SMA_200']) else 0
                 
-                adx_col = [col for col in df_calc.columns if 'ADX' in col]
-                adx_val = float(latest[adx_col[0]]) if adx_col else 0
+                df_calc = calculate_adx(df_calc)
+                latest = df_calc.iloc[-1]
+                adx_val = float(latest['ADX']) if not pd.isna(latest['ADX']) else 0
                 
                 # 3. Dynamic Logic Check
                 uptrend = sma_f > ema_s
@@ -223,9 +250,7 @@ with tab2:
         df_chart['EMA_Slow'] = df_chart['Close'].ewm(span=slow_ma, adjust=False).mean()
         df_chart['SMA_200'] = df_chart['Close'].rolling(window=200).mean()
         
-        adx_df = df_chart.ta.adx(length=14)
-        if adx_df is not None: 
-            df_chart = pd.concat([df_chart, adx_df], axis=1)
+        df_chart = calculate_adx(df_chart)
             
         df_chart = df_chart.tail(150) # Show last 150 days to give wider context for the 200 SMA
         
@@ -239,8 +264,12 @@ with tab2:
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_200'], line=dict(color='#FF5F1F', width=2, dash='dot'), name='200 SMA Baseline'), row=1, col=1)
         
         # Add ADX
-        adx_col = [col for col in df_chart.columns if 'ADX' in col][0]
-        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart[adx_col], line=dict(color='purple', width=2), name='ADX'), row=2, col=1)
+        fig.add_trace(go.Scatter(
+    x=df_chart.index,
+    y=df_chart['ADX'],
+    line=dict(color='purple', width=2),
+    name='ADX'
+), row=2, col=1)
         fig.add_hline(y=adx_threshold, line_dash="dash", line_color="green", row=2, col=1)
 
         fig.update_layout(title=f'{selected_ticker} - Dynamic Technical Chart', height=700, xaxis_rangeslider_visible=False)
