@@ -35,13 +35,6 @@ def calculate_adx(df, period=14):
     return df
 
 # ==========================================
-# DEVELOPER SETTINGS
-# ==========================================
-# Set this to a number (e.g., 100) to speed up testing. 
-# Change it to None when you want to scan the entire market.
-MAX_STOCKS_TO_SCAN = 100 
-
-# ==========================================
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(page_title="Swing Trading Dashboard", layout="wide", page_icon="📈")
@@ -85,14 +78,30 @@ if scan_mode == "Custom Watchlist":
     tickers_input = st.sidebar.text_area("Tickers to Scan (comma separated)", value=default_tickers)
     tickers_list = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 else:
-    # APPLY THE LIMIT HERE
+    # APPLY THE DYNAMIC LIMIT HERE
     full_market_list = get_market_tickers()
-    if MAX_STOCKS_TO_SCAN is not None:
-        st.sidebar.info(f"🧪 **Testing Mode:** Scanning limited to first {MAX_STOCKS_TO_SCAN} stocks.")
-        tickers_list = full_market_list[:MAX_STOCKS_TO_SCAN]
+    total_market_stocks = len(full_market_list)
+    
+    if total_market_stocks > 0:
+        # Dynamic number input showing the max available stocks
+        stocks_to_scan = st.sidebar.number_input(
+            f"Stocks to Scan (Max: {total_market_stocks})", 
+            min_value=1, 
+            max_value=total_market_stocks, 
+            value=min(100, total_market_stocks), # Defaults to 100
+            step=50
+        )
+        
+        tickers_list = full_market_list[:stocks_to_scan]
+        
+        # Display dynamic warnings based on user input
+        if stocks_to_scan < total_market_stocks:
+            st.sidebar.info(f"🧪 **Testing Mode:** Scanning limited to first {stocks_to_scan} stocks.")
+        else:
+            st.sidebar.warning(f"⚠️ **Warning:** Scanning all {total_market_stocks} stocks takes 5-10 minutes.")
     else:
-        st.sidebar.warning("⚠️ **Warning:** Scanning 5,000+ stocks takes 5-10 minutes.")
-        tickers_list = full_market_list
+        tickers_list = []
+        st.sidebar.error("Failed to load market tickers.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Interactive Parameters")
@@ -193,17 +202,13 @@ with tab1:
                 df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
                 df_calc['SMA_200'] = df_calc['Close'].rolling(window=200).mean()
                 
-                adx_df = df_calc.ta.adx(length=14)
-                if adx_df is not None:
-                    df_calc = pd.concat([df_calc, adx_df], axis=1)
+                # Using the custom ADX function defined at the top
+                df_calc = calculate_adx(df_calc)
                 
                 latest = df_calc.iloc[-1]
                 sma_f = float(latest['SMA_Fast'])
                 ema_s = float(latest['EMA_Slow'])
                 sma_200 = float(latest['SMA_200']) if not pd.isna(latest['SMA_200']) else 0
-                
-                df_calc = calculate_adx(df_calc)
-                latest = df_calc.iloc[-1]
                 adx_val = float(latest['ADX']) if not pd.isna(latest['ADX']) else 0
                 
                 # 3. Dynamic Logic Check
@@ -265,11 +270,11 @@ with tab2:
         
         # Add ADX
         fig.add_trace(go.Scatter(
-    x=df_chart.index,
-    y=df_chart['ADX'],
-    line=dict(color='purple', width=2),
-    name='ADX'
-), row=2, col=1)
+            x=df_chart.index,
+            y=df_chart['ADX'],
+            line=dict(color='purple', width=2),
+            name='ADX'
+        ), row=2, col=1)
         fig.add_hline(y=adx_threshold, line_dash="dash", line_color="green", row=2, col=1)
 
         fig.update_layout(title=f'{selected_ticker} - Dynamic Technical Chart', height=700, xaxis_rangeslider_visible=False)
