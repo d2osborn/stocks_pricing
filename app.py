@@ -180,48 +180,52 @@ with tab1:
         
         with st.spinner("Calculating indicators based on your parameters..."):
             for ticker, df in raw_data.items():
-                
-                # 1. Fast Filter: Check Price, Volume, and Candle Color
-                latest_close = float(df.iloc[-1]['Close'])
-                latest_open = float(df.iloc[-1]['Open'])
-                avg_vol = df['Volume'].tail(20).mean()
-                
-                # Filter out low price, low volume, or red candles immediately
-                if latest_close < min_price or avg_vol < min_volume or latest_close < latest_open:
+                try:
+                    # 1. Fast Filter: Check Price, Volume, and Candle Color
+                    # Swapped iloc order to be slightly safer and wrapped in float()
+                    latest_close = float(df['Close'].iloc[-1])
+                    latest_open = float(df['Open'].iloc[-1])
+                    avg_vol = float(df['Volume'].tail(20).mean())
+                    
+                    # Filter out low price, low volume, or red candles immediately
+                    if latest_close < min_price or avg_vol < min_volume or latest_close < latest_open:
+                        continue
+                    
+                    # 2. Calculate Indicators
+                    df_calc = df.copy()
+                    df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
+                    df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
+                    df_calc['SMA_200'] = df_calc['Close'].rolling(window=200).mean()
+                    df_calc = calculate_adx(df_calc)
+                    
+                    latest = df_calc.iloc[-1]
+                    sma_f = float(latest['SMA_Fast'])
+                    ema_s = float(latest['EMA_Slow'])
+                    sma_200 = float(latest['SMA_200']) if not pd.isna(latest['SMA_200']) else 0
+                    adx_val = float(latest['ADX']) if not pd.isna(latest['ADX']) else 0
+                    
+                    # 3. Dynamic Logic Check
+                    uptrend = sma_f > ema_s
+                    in_taz = (latest_close < sma_f) and (latest_close > ema_s)
+                    strong_trend = adx_val >= adx_threshold
+                    
+                    above_200 = latest_close > sma_200
+                    if require_200_sma and not above_200:
+                        continue
+                    
+                    if uptrend and in_taz and strong_trend:
+                        results.append({
+                            "Ticker": ticker,
+                            "Close": round(latest_close, 2),
+                            "Open": round(latest_open, 2),
+                            f"{fast_ma} SMA": round(sma_f, 2),
+                            f"{slow_ma} EMA": round(ema_s, 2),
+                            "ADX": round(adx_val, 2),
+                            "Avg Volume": f"{int(avg_vol):,}"
+                        })
+                except Exception:
+                    # If a junk stock throws a TypeError or IndexError, just skip it!
                     continue
-                
-                # 2. Calculate Indicators
-                df_calc = df.copy()
-                df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
-                df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
-                df_calc['SMA_200'] = df_calc['Close'].rolling(window=200).mean()
-                df_calc = calculate_adx(df_calc)
-                
-                latest = df_calc.iloc[-1]
-                sma_f = float(latest['SMA_Fast'])
-                ema_s = float(latest['EMA_Slow'])
-                sma_200 = float(latest['SMA_200']) if not pd.isna(latest['SMA_200']) else 0
-                adx_val = float(latest['ADX']) if not pd.isna(latest['ADX']) else 0
-                
-                # 3. Dynamic Logic Check
-                uptrend = sma_f > ema_s
-                in_taz = (latest_close < sma_f) and (latest_close > ema_s)
-                strong_trend = adx_val >= adx_threshold
-                
-                above_200 = latest_close > sma_200
-                if require_200_sma and not above_200:
-                    continue
-                
-                if uptrend and in_taz and strong_trend:
-                    results.append({
-                        "Ticker": ticker,
-                        "Close": round(latest_close, 2),
-                        "Open": round(latest_open, 2),
-                        f"{fast_ma} SMA": round(sma_f, 2),
-                        f"{slow_ma} EMA": round(ema_s, 2),
-                        "ADX": round(adx_val, 2),
-                        "Avg Volume": f"{int(avg_vol):,}"
-                    })
                 
         if results:
             results_df = pd.DataFrame(results)
