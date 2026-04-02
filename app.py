@@ -78,23 +78,20 @@ if scan_mode == "Custom Watchlist":
     tickers_input = st.sidebar.text_area("Tickers to Scan (comma separated)", value=default_tickers)
     tickers_list = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 else:
-    # APPLY THE DYNAMIC LIMIT HERE
     full_market_list = get_market_tickers()
     total_market_stocks = len(full_market_list)
     
     if total_market_stocks > 0:
-        # Dynamic number input showing the max available stocks
         stocks_to_scan = st.sidebar.number_input(
             f"Stocks to Scan (Max: {total_market_stocks})", 
             min_value=1, 
             max_value=total_market_stocks, 
-            value=min(100, total_market_stocks), # Defaults to 100
+            value=min(100, total_market_stocks),
             step=50
         )
         
         tickers_list = full_market_list[:stocks_to_scan]
         
-        # Display dynamic warnings based on user input
         if stocks_to_scan < total_market_stocks:
             st.sidebar.info(f"🧪 **Testing Mode:** Scanning limited to first {stocks_to_scan} stocks.")
         else:
@@ -106,14 +103,10 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Interactive Parameters")
 
-# Interactive Moving Average Adjustments
 fast_ma = st.sidebar.number_input("Fast SMA Period (Default 10)", min_value=3, max_value=50, value=10)
 slow_ma = st.sidebar.number_input("Slow EMA Period (Default 30)", min_value=10, max_value=200, value=30)
-
-# Interacting Filters to weed out bad setups
 min_price = st.sidebar.number_input("Minimum Stock Price ($)", min_value=1.0, value=5.0, step=1.0)
 min_volume = st.sidebar.number_input("Min Average Volume (20-day)", min_value=10000, value=500000, step=100000)
-
 adx_threshold = st.sidebar.slider("ADX Strength Threshold", min_value=10, max_value=50, value=25, step=1)
 
 st.sidebar.markdown("---")
@@ -125,17 +118,17 @@ st.sidebar.info(
     f"**Current Screening Logic:**\n"
     f"- **Trend:** {fast_ma} SMA > {slow_ma} EMA\n"
     f"- **Pullback:** Close is between {fast_ma} SMA and {slow_ma} EMA\n"
+    f"- **Candle:** Close >= Open (Green/Flat)\n"
     f"- **Strength:** ADX > {adx_threshold}\n"
     f"- **Baseline:** > 200 SMA (if checked)\n"
     f"- **Filters:** Price > ${min_price}, Vol > {min_volume}"
 )
 
 # ==========================================
-# DATA FETCHING (SEPARATED FOR SPEED)
+# DATA FETCHING
 # ==========================================
 @st.cache_data(ttl=3600) 
 def fetch_raw_data(tickers):
-    """Downloads raw OHLCV data. Pulling 400 calendar days to ensure we have 200 trading days for the 200 SMA."""
     end_date = datetime.date.today()
     start_date = end_date - datetime.timedelta(days=400) 
     
@@ -151,7 +144,7 @@ def fetch_raw_data(tickers):
         
         try:
             df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if df.empty or len(df) < 200: # Ensure we have enough data for the 200 SMA
+            if df.empty or len(df) < 200: 
                 continue
             
             if isinstance(df.columns, pd.MultiIndex):
@@ -174,7 +167,6 @@ elif 'raw_data' not in st.session_state:
 # TABS SETUP
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🔍 Pullback Screeners", "📊 Charting", "⏱️ Market Timing (Macro)"])
-
 raw_data = st.session_state['raw_data']
 
 # ==========================================
@@ -189,20 +181,20 @@ with tab1:
         with st.spinner("Calculating indicators based on your parameters..."):
             for ticker, df in raw_data.items():
                 
-                # 1. Fast Filter: Check Price and Volume first to save processing time
+                # 1. Fast Filter: Check Price, Volume, and Candle Color
                 latest_close = float(df.iloc[-1]['Close'])
+                latest_open = float(df.iloc[-1]['Open'])
                 avg_vol = df['Volume'].tail(20).mean()
                 
-                if latest_close < min_price or avg_vol < min_volume:
+                # Filter out low price, low volume, or red candles immediately
+                if latest_close < min_price or avg_vol < min_volume or latest_close < latest_open:
                     continue
                 
-                # 2. Calculate Indicators on-the-fly for stocks that pass the basic filter
+                # 2. Calculate Indicators
                 df_calc = df.copy()
                 df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
                 df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
                 df_calc['SMA_200'] = df_calc['Close'].rolling(window=200).mean()
-                
-                # Using the custom ADX function defined at the top
                 df_calc = calculate_adx(df_calc)
                 
                 latest = df_calc.iloc[-1]
@@ -216,20 +208,18 @@ with tab1:
                 in_taz = (latest_close < sma_f) and (latest_close > ema_s)
                 strong_trend = adx_val >= adx_threshold
                 
-                # Check 200 SMA Baseline Filter
                 above_200 = latest_close > sma_200
                 if require_200_sma and not above_200:
                     continue
                 
-                if uptrend and in_taz:
+                if uptrend and in_taz and strong_trend:
                     results.append({
                         "Ticker": ticker,
                         "Close": round(latest_close, 2),
+                        "Open": round(latest_open, 2),
                         f"{fast_ma} SMA": round(sma_f, 2),
                         f"{slow_ma} EMA": round(ema_s, 2),
-                        "200 SMA": round(sma_200, 2),
                         "ADX": round(adx_val, 2),
-                        "Strong Trend?": "✅ Yes" if strong_trend else "❌ No",
                         "Avg Volume": f"{int(avg_vol):,}"
                     })
                 
@@ -249,32 +239,52 @@ with tab2:
     if raw_data:
         selected_ticker = st.selectbox("Select a ticker to view chart:", list(raw_data.keys()))
         
-        # Calculate dynamic indicators for the selected chart
+        # Calculate dynamic indicators
         df_chart = raw_data[selected_ticker].copy()
         df_chart['SMA_Fast'] = df_chart['Close'].rolling(window=fast_ma).mean()
         df_chart['EMA_Slow'] = df_chart['Close'].ewm(span=slow_ma, adjust=False).mean()
         df_chart['SMA_200'] = df_chart['Close'].rolling(window=200).mean()
-        
         df_chart = calculate_adx(df_chart)
             
-        df_chart = df_chart.tail(150) # Show last 150 days to give wider context for the 200 SMA
+        df_chart = df_chart.tail(150) 
+        
+        # --- NEW VISUAL HIGHLIGHT LOGIC ---
+        # Find historical dates where the exact screener setup was triggered
+        setup_mask = (
+            (df_chart['SMA_Fast'] > df_chart['EMA_Slow']) & 
+            (df_chart['Close'] < df_chart['SMA_Fast']) & 
+            (df_chart['Close'] > df_chart['EMA_Slow']) & 
+            (df_chart['Close'] >= df_chart['Open']) & 
+            (df_chart['ADX'] >= adx_threshold)
+        )
+        if require_200_sma:
+            setup_mask = setup_mask & (df_chart['Close'] > df_chart['SMA_200'])
+            
+        setup_dates = df_chart[setup_mask].index
+        setup_prices = df_chart[setup_mask]['Low'] * 0.98 # Place marker slightly below the candle's low
+        # ----------------------------------
         
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
+        # Candlestick
         fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='Price'), row=1, col=1)
         
-        # Add Dynamic Moving Averages
+        # Setup Markers (Visual Highlight)
+        if not setup_dates.empty:
+            fig.add_trace(go.Scatter(
+                x=setup_dates, y=setup_prices,
+                mode='markers',
+                marker=dict(symbol='triangle-up', size=12, color='green', line=dict(width=1, color='DarkSlateGrey')),
+                name='Setup Trigger'
+            ), row=1, col=1)
+        
+        # Moving Averages
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_Fast'], line=dict(color='blue', width=1.5), name=f'{fast_ma} SMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA_Slow'], line=dict(color='red', width=1.5), name=f'{slow_ma} EMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_200'], line=dict(color='#FF5F1F', width=2, dash='dot'), name='200 SMA Baseline'), row=1, col=1)
         
-        # Add ADX
-        fig.add_trace(go.Scatter(
-            x=df_chart.index,
-            y=df_chart['ADX'],
-            line=dict(color='purple', width=2),
-            name='ADX'
-        ), row=2, col=1)
+        # ADX
+        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['ADX'], line=dict(color='purple', width=2), name='ADX'), row=2, col=1)
         fig.add_hline(y=adx_threshold, line_dash="dash", line_color="green", row=2, col=1)
 
         fig.update_layout(title=f'{selected_ticker} - Dynamic Technical Chart', height=700, xaxis_rangeslider_visible=False)
