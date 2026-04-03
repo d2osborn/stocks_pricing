@@ -129,8 +129,8 @@ st.sidebar.info(
 # ==========================================
 @st.cache_data(ttl=3600) 
 def fetch_raw_data(tickers):
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=400) 
+    # Calculate start date as 400 days ago
+    start_date = datetime.date.today() - datetime.timedelta(days=400) 
     
     raw_data_dict = {}
     total_tickers = len(tickers)
@@ -143,7 +143,10 @@ def fetch_raw_data(tickers):
         my_bar.progress(progress, text=f"Fetching {ticker} ({i+1}/{total_tickers})...")
         
         try:
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            # REMOVED: end=end_date. 
+            # This forces yfinance to always pull up to the exact current day/time.
+            df = yf.download(ticker, start=start_date, progress=False)
+            
             if df.empty or len(df) < 200: 
                 continue
             
