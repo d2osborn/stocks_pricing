@@ -34,6 +34,47 @@ def calculate_adx(df, period=14):
 
     return df
 
+def detect_bullish_patterns(df):
+    """Detects 5 specific bullish candlestick patterns on the latest trading day."""
+    if len(df) < 2:
+        return "None"
+        
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    c_o, c_c, c_h, c_l = curr['Open'], curr['Close'], curr['High'], curr['Low']
+    p_o, p_c, p_h, p_l = prev['Open'], prev['Close'], prev['High'], prev['Low']
+    
+    c_body = abs(c_c - c_o)
+    c_range = c_h - c_l
+    p_body = abs(p_c - p_o)
+    
+    patterns = []
+    
+    # 1. Bullish Engulfing
+    if (p_c < p_o) and (c_c > c_o) and (c_o <= p_c) and (c_c >= p_o):
+        patterns.append("Engulfing")
+        
+    # 2. Hammer
+    lower_shadow = min(c_o, c_c) - c_l
+    upper_shadow = c_h - max(c_o, c_c)
+    if (lower_shadow >= 2 * c_body) and (upper_shadow <= c_range * 0.1) and (c_range > 0):
+        patterns.append("Hammer")
+        
+    # 3. Bullish Harami
+    if (p_c < p_o) and (c_c > c_o) and (c_o > p_c) and (c_c < p_o):
+        patterns.append("Harami")
+        
+    # 4. Piercing Line
+    if (p_c < p_o) and (c_c > c_o) and (c_o < p_c) and (c_c > (p_o + p_c) / 2):
+        patterns.append("Piercing")
+        
+    # 5. Doji
+    if c_range > 0 and c_body <= (c_range * 0.1): 
+        patterns.append("Doji")
+        
+    return ", ".join(patterns) if patterns else "None"
+
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
@@ -114,11 +155,18 @@ st.sidebar.subheader("📈 Long-Term Trend")
 require_200_sma = st.sidebar.checkbox("Require Price > 200 SMA (Baseline Filter)", value=True)
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("🕯️ Candlestick Filters")
+candlestick_filter = st.sidebar.multiselect(
+    "Require Bullish Pattern (Leave blank for no pattern filter)",
+    ["Engulfing", "Hammer", "Harami", "Piercing", "Doji"]
+)
+
+st.sidebar.markdown("---")
 st.sidebar.info(
     f"**Current Screening Logic:**\n"
     f"- **Trend:** {fast_ma} SMA > {slow_ma} EMA\n"
     f"- **Pullback:** Close is between {fast_ma} SMA and {slow_ma} EMA\n"
-    f"- **Candle:** Close >= Open (Green/Flat)\n"
+    f"- **Candle:** {', '.join(candlestick_filter) if candlestick_filter else 'Green/Flat Only'}\n"
     f"- **Strength:** ADX > {adx_threshold}\n"
     f"- **Baseline:** > 200 SMA (if checked)\n"
     f"- **Filters:** Price > ${min_price}, Vol > {min_volume}"
@@ -129,7 +177,6 @@ st.sidebar.info(
 # ==========================================
 @st.cache_data(ttl=3600) 
 def fetch_raw_data(tickers):
-    # Calculate start date as 400 days ago
     start_date = datetime.date.today() - datetime.timedelta(days=400) 
     
     raw_data_dict = {}
@@ -143,8 +190,6 @@ def fetch_raw_data(tickers):
         my_bar.progress(progress, text=f"Fetching {ticker} ({i+1}/{total_tickers})...")
         
         try:
-            # REMOVED: end=end_date. 
-            # This forces yfinance to always pull up to the exact current day/time.
             df = yf.download(ticker, start=start_date, progress=False)
             
             if df.empty or len(df) < 200: 
@@ -184,14 +229,12 @@ with tab1:
         with st.spinner("Calculating indicators based on your parameters..."):
             for ticker, df in raw_data.items():
                 try:
-                    # 1. Fast Filter: Check Price, Volume, and Candle Color
-                    # Swapped iloc order to be slightly safer and wrapped in float()
+                    # 1. Fast Filter: Check Price, Volume
                     latest_close = float(df['Close'].iloc[-1])
                     latest_open = float(df['Open'].iloc[-1])
                     avg_vol = float(df['Volume'].tail(20).mean())
                     
-                    # Filter out low price, low volume, or red candles immediately
-                    if latest_close < min_price or avg_vol < min_volume or latest_close < latest_open:
+                    if latest_close < min_price or avg_vol < min_volume:
                         continue
                     
                     # 2. Calculate Indicators
@@ -215,10 +258,27 @@ with tab1:
                     above_200 = latest_close > sma_200
                     if require_200_sma and not above_200:
                         continue
+                        
+                    # 4. Candlestick Pattern Checking
+                    detected_patterns_str = detect_bullish_patterns(df_calc)
+                    detected_list = [p.strip() for p in detected_patterns_str.split(",")] if detected_patterns_str != "None" else []
                     
-                    if uptrend and in_taz and strong_trend:
+                    passes_pattern_filter = True
+                    is_green = latest_close >= latest_open
+                    
+                    if candlestick_filter:
+                        # If user selected specific patterns, at least one must match
+                        if not any(p in candlestick_filter for p in detected_list):
+                            passes_pattern_filter = False
+                    else:
+                        # If no patterns selected, fallback to simple green candle requirement
+                        if not is_green:
+                            passes_pattern_filter = False
+                    
+                    if uptrend and in_taz and strong_trend and passes_pattern_filter:
                         results.append({
                             "Ticker": ticker,
+                            "Pattern": detected_patterns_str,
                             "Close": round(latest_close, 2),
                             "Open": round(latest_open, 2),
                             f"{fast_ma} SMA": round(sma_f, 2),
@@ -227,16 +287,17 @@ with tab1:
                             "Avg Volume": f"{int(avg_vol):,}"
                         })
                 except Exception:
-                    # If a junk stock throws a TypeError or IndexError, just skip it!
                     continue
                 
         if results:
             results_df = pd.DataFrame(results)
-            results_df = results_df.sort_values(by="ADX", ascending=False).reset_index(drop=True)
+            # Order columns nicely
+            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA", "ADX", "Avg Volume"]
+            results_df = results_df[cols].sort_values(by="ADX", ascending=False).reset_index(drop=True)
             st.dataframe(results_df, use_container_width=True)
             st.success(f"Found {len(results_df)} setups out of {len(tickers_list)} scanned stocks.")
         else:
-            st.warning("No stocks currently meet your strict parameters. Try widening the moving averages, lowering the ADX, or disabling the 200 SMA filter.")
+            st.warning("No stocks currently meet your strict parameters. Try widening the moving averages, lowering the ADX, or removing specific candlestick filters.")
 
 # ==========================================
 # TAB 2: DYNAMIC CHARTING
@@ -246,7 +307,6 @@ with tab2:
     if raw_data:
         selected_ticker = st.selectbox("Select a ticker to view chart:", list(raw_data.keys()))
         
-        # Calculate dynamic indicators
         df_chart = raw_data[selected_ticker].copy()
         df_chart['SMA_Fast'] = df_chart['Close'].rolling(window=fast_ma).mean()
         df_chart['EMA_Slow'] = df_chart['Close'].ewm(span=slow_ma, adjust=False).mean()
@@ -255,8 +315,6 @@ with tab2:
             
         df_chart = df_chart.tail(150) 
         
-        # --- NEW VISUAL HIGHLIGHT LOGIC ---
-        # Find historical dates where the exact screener setup was triggered
         setup_mask = (
             (df_chart['SMA_Fast'] > df_chart['EMA_Slow']) & 
             (df_chart['Close'] < df_chart['SMA_Fast']) & 
@@ -268,15 +326,12 @@ with tab2:
             setup_mask = setup_mask & (df_chart['Close'] > df_chart['SMA_200'])
             
         setup_dates = df_chart[setup_mask].index
-        setup_prices = df_chart[setup_mask]['Low'] * 0.98 # Place marker slightly below the candle's low
-        # ----------------------------------
+        setup_prices = df_chart[setup_mask]['Low'] * 0.98 
         
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-        # Candlestick
         fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='Price'), row=1, col=1)
         
-        # Setup Markers (Visual Highlight)
         if not setup_dates.empty:
             fig.add_trace(go.Scatter(
                 x=setup_dates, y=setup_prices,
@@ -285,12 +340,10 @@ with tab2:
                 name='Setup Trigger'
             ), row=1, col=1)
         
-        # Moving Averages
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_Fast'], line=dict(color='blue', width=1.5), name=f'{fast_ma} SMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA_Slow'], line=dict(color='red', width=1.5), name=f'{slow_ma} EMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_200'], line=dict(color='#FF5F1F', width=2, dash='dot'), name='200 SMA Baseline'), row=1, col=1)
         
-        # ADX
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['ADX'], line=dict(color='purple', width=2), name='ADX'), row=2, col=1)
         fig.add_hline(y=adx_threshold, line_dash="dash", line_color="green", row=2, col=1)
 
