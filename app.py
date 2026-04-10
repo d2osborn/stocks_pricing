@@ -150,6 +150,11 @@ min_price = st.sidebar.number_input("Minimum Stock Price ($)", min_value=1.0, va
 min_volume = st.sidebar.number_input("Min Average Volume (20-day)", min_value=10000, value=500000, step=100000)
 adx_threshold = st.sidebar.slider("ADX Strength Threshold", min_value=10, max_value=50, value=25, step=1)
 
+# NEW: Timing Filters
+st.sidebar.markdown("---")
+st.sidebar.subheader("⏳ Timing Filters")
+use_prev_day = st.sidebar.checkbox("Scan on Previous Day's Close (Ignore Today's Live Data)", value=False)
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("📈 Long-Term Trend")
 require_200_sma = st.sidebar.checkbox("Require Price > 200 SMA (Baseline Filter)", value=True)
@@ -167,7 +172,7 @@ st.sidebar.info(
     f"- **Trend:** {fast_ma} SMA > {slow_ma} EMA\n"
     f"- **Pullback:** Close is between {fast_ma} SMA and {slow_ma} EMA\n"
     f"- **Candle:** {', '.join(candlestick_filter) if candlestick_filter else 'Green/Flat Only'}\n"
-    f"- **Strength:** ADX > {adx_threshold}\n"
+    f"- **Strength:** 10-period ADX > {adx_threshold}\n"
     f"- **Baseline:** > 200 SMA (if checked)\n"
     f"- **Filters:** Price > ${min_price}, Vol > {min_volume}"
 )
@@ -229,20 +234,27 @@ with tab1:
         with st.spinner("Calculating indicators based on your parameters..."):
             for ticker, df in raw_data.items():
                 try:
+                    df_calc = df.copy()
+
+                    # Drop the live/current day if the toggle is checked
+                    if use_prev_day and len(df_calc) > 2:
+                        df_calc = df_calc.iloc[:-1]
+
                     # 1. Fast Filter: Check Price, Volume
-                    latest_close = float(df['Close'].iloc[-1])
-                    latest_open = float(df['Open'].iloc[-1])
-                    avg_vol = float(df['Volume'].tail(20).mean())
+                    latest_close = float(df_calc['Close'].iloc[-1])
+                    latest_open = float(df_calc['Open'].iloc[-1])
+                    avg_vol = float(df_calc['Volume'].tail(20).mean())
                     
                     if latest_close < min_price or avg_vol < min_volume:
                         continue
                     
                     # 2. Calculate Indicators
-                    df_calc = df.copy()
                     df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
                     df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
                     df_calc['SMA_200'] = df_calc['Close'].rolling(window=200).mean()
-                    df_calc = calculate_adx(df_calc)
+                    
+                    # Force ADX period to 10
+                    df_calc = calculate_adx(df_calc, period=10)
                     
                     latest = df_calc.iloc[-1]
                     sma_f = float(latest['SMA_Fast'])
@@ -308,10 +320,17 @@ with tab2:
         selected_ticker = st.selectbox("Select a ticker to view chart:", list(raw_data.keys()))
         
         df_chart = raw_data[selected_ticker].copy()
+        
+        # Drop the live/current day if the toggle is checked
+        if use_prev_day and len(df_chart) > 2:
+            df_chart = df_chart.iloc[:-1]
+            
         df_chart['SMA_Fast'] = df_chart['Close'].rolling(window=fast_ma).mean()
         df_chart['EMA_Slow'] = df_chart['Close'].ewm(span=slow_ma, adjust=False).mean()
         df_chart['SMA_200'] = df_chart['Close'].rolling(window=200).mean()
-        df_chart = calculate_adx(df_chart)
+        
+        # Force ADX period to 10
+        df_chart = calculate_adx(df_chart, period=10)
             
         df_chart = df_chart.tail(150) 
         
@@ -344,7 +363,7 @@ with tab2:
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA_Slow'], line=dict(color='red', width=1.5), name=f'{slow_ma} EMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_200'], line=dict(color='#FF5F1F', width=2, dash='dot'), name='200 SMA Baseline'), row=1, col=1)
         
-        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['ADX'], line=dict(color='purple', width=2), name='ADX'), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['ADX'], line=dict(color='purple', width=2), name='ADX (10)'), row=2, col=1)
         fig.add_hline(y=adx_threshold, line_dash="dash", line_color="green", row=2, col=1)
 
         fig.update_layout(title=f'{selected_ticker} - Dynamic Technical Chart', height=700, xaxis_rangeslider_visible=False)
