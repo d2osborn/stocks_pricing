@@ -148,7 +148,9 @@ fast_ma = st.sidebar.number_input("Fast SMA Period (Default 10)", min_value=3, m
 slow_ma = st.sidebar.number_input("Slow EMA Period (Default 30)", min_value=10, max_value=200, value=30)
 min_price = st.sidebar.number_input("Minimum Stock Price ($)", min_value=1.0, value=5.0, step=1.0)
 min_volume = st.sidebar.number_input("Min Average Volume (20-day)", min_value=10000, value=500000, step=100000)
-adx_threshold = st.sidebar.slider("ADX Strength Threshold", min_value=10, max_value=50, value=25, step=1)
+
+# CHANGE: ADX is now a range slider
+adx_min, adx_max = st.sidebar.slider("ADX Strength Range", min_value=0, max_value=100, value=(25, 100), step=1)
 
 # NEW: Timing Filters
 st.sidebar.markdown("---")
@@ -157,10 +159,15 @@ use_prev_day = st.sidebar.checkbox("Scan on Previous Day's Close (Ignore Today's
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📈 Long-Term Trend")
-require_200_sma = st.sidebar.checkbox("Require Price > 200 SMA (Baseline Filter)", value=True)
+# CHANGE: Baseline filter updated to 30 SMA > 200 SMA
+require_200_sma = st.sidebar.checkbox("Require 30 SMA > 200 SMA (Baseline Filter)", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🕯️ Candlestick Filters")
+
+# CHANGE: Added toggle for the basic green candle check
+require_green_candle = st.sidebar.checkbox("Require Green Candle (Close > Open)", value=True)
+
 candlestick_filter = st.sidebar.multiselect(
     "Require Bullish Pattern (Leave blank for no pattern filter)",
     ["Engulfing", "Hammer", "Harami", "Piercing", "Doji"]
@@ -171,9 +178,9 @@ st.sidebar.info(
     f"**Current Screening Logic:**\n"
     f"- **Trend:** {fast_ma} SMA > {slow_ma} EMA\n"
     f"- **Pullback:** Close is between {fast_ma} SMA and {slow_ma} EMA\n"
-    f"- **Candle:** {', '.join(candlestick_filter) if candlestick_filter else 'Green/Flat Only'}\n"
-    f"- **Strength:** 10-period ADX > {adx_threshold}\n"
-    f"- **Baseline:** > 200 SMA (if checked)\n"
+    f"- **Candle:** {', '.join(candlestick_filter) if candlestick_filter else ('Green Only' if require_green_candle else 'Any Candle')}\n"
+    f"- **Strength:** 10-period ADX between {adx_min} and {adx_max}\n"
+    f"- **Baseline:** 30 SMA > 200 SMA (if checked)\n"
     f"- **Filters:** Price > ${min_price}, Vol > {min_volume}"
 )
 
@@ -251,6 +258,7 @@ with tab1:
                     # 2. Calculate Indicators
                     df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
                     df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
+                    df_calc['SMA_30'] = df_calc['Close'].rolling(window=30).mean() # NEW: explicitly track 30 SMA
                     df_calc['SMA_200'] = df_calc['Close'].rolling(window=200).mean()
                     
                     # Force ADX period to 10
@@ -259,15 +267,19 @@ with tab1:
                     latest = df_calc.iloc[-1]
                     sma_f = float(latest['SMA_Fast'])
                     ema_s = float(latest['EMA_Slow'])
+                    sma_30 = float(latest['SMA_30']) if not pd.isna(latest['SMA_30']) else 0
                     sma_200 = float(latest['SMA_200']) if not pd.isna(latest['SMA_200']) else 0
                     adx_val = float(latest['ADX']) if not pd.isna(latest['ADX']) else 0
                     
                     # 3. Dynamic Logic Check
                     uptrend = sma_f > ema_s
                     in_taz = (latest_close < sma_f) and (latest_close > ema_s)
-                    strong_trend = adx_val >= adx_threshold
                     
-                    above_200 = latest_close > sma_200
+                    # CHANGE: Use ADX min and max
+                    strong_trend = adx_min <= adx_val <= adx_max
+                    
+                    # CHANGE: Evaluate 30 SMA vs 200 SMA
+                    above_200 = sma_30 > sma_200
                     if require_200_sma and not above_200:
                         continue
                         
@@ -276,14 +288,16 @@ with tab1:
                     detected_list = [p.strip() for p in detected_patterns_str.split(",")] if detected_patterns_str != "None" else []
                     
                     passes_pattern_filter = True
-                    is_green = latest_close >= latest_open
+                    
+                    # CHANGE: STRICTLY greater than
+                    is_green = latest_close > latest_open
                     
                     if candlestick_filter:
                         # If user selected specific patterns, at least one must match
                         if not any(p in candlestick_filter for p in detected_list):
                             passes_pattern_filter = False
-                    else:
-                        # If no patterns selected, fallback to simple green candle requirement
+                    elif require_green_candle:
+                        # If no patterns selected, fallback to green candle requirement (if toggled on)
                         if not is_green:
                             passes_pattern_filter = False
                     
@@ -327,6 +341,7 @@ with tab2:
             
         df_chart['SMA_Fast'] = df_chart['Close'].rolling(window=fast_ma).mean()
         df_chart['EMA_Slow'] = df_chart['Close'].ewm(span=slow_ma, adjust=False).mean()
+        df_chart['SMA_30'] = df_chart['Close'].rolling(window=30).mean()
         df_chart['SMA_200'] = df_chart['Close'].rolling(window=200).mean()
         
         # Force ADX period to 10
@@ -334,15 +349,20 @@ with tab2:
             
         df_chart = df_chart.tail(150) 
         
+        # CHANGE: Aligning setup_mask charting logic with the new filters
         setup_mask = (
             (df_chart['SMA_Fast'] > df_chart['EMA_Slow']) & 
             (df_chart['Close'] < df_chart['SMA_Fast']) & 
             (df_chart['Close'] > df_chart['EMA_Slow']) & 
-            (df_chart['Close'] >= df_chart['Open']) & 
-            (df_chart['ADX'] >= adx_threshold)
+            (df_chart['ADX'] >= adx_min) & 
+            (df_chart['ADX'] <= adx_max)
         )
+        
+        if require_green_candle and not candlestick_filter:
+            setup_mask = setup_mask & (df_chart['Close'] > df_chart['Open'])
+            
         if require_200_sma:
-            setup_mask = setup_mask & (df_chart['Close'] > df_chart['SMA_200'])
+            setup_mask = setup_mask & (df_chart['SMA_30'] > df_chart['SMA_200'])
             
         setup_dates = df_chart[setup_mask].index
         setup_prices = df_chart[setup_mask]['Low'] * 0.98 
@@ -361,10 +381,16 @@ with tab2:
         
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_Fast'], line=dict(color='blue', width=1.5), name=f'{fast_ma} SMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA_Slow'], line=dict(color='red', width=1.5), name=f'{slow_ma} EMA'), row=1, col=1)
+        
+        # Adding 30 SMA to the chart so you can visualize the baseline cross
+        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_30'], line=dict(color='#8A2BE2', width=1, dash='dot'), name='30 SMA Baseline'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_200'], line=dict(color='#FF5F1F', width=2, dash='dot'), name='200 SMA Baseline'), row=1, col=1)
         
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['ADX'], line=dict(color='purple', width=2), name='ADX (10)'), row=2, col=1)
-        fig.add_hline(y=adx_threshold, line_dash="dash", line_color="green", row=2, col=1)
+        
+        # Highlighting the ADX zone
+        fig.add_hline(y=adx_min, line_dash="dash", line_color="green", row=2, col=1)
+        fig.add_hline(y=adx_max, line_dash="dash", line_color="red", row=2, col=1)
 
         fig.update_layout(title=f'{selected_ticker} - Dynamic Technical Chart', height=700, xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
