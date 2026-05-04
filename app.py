@@ -147,7 +147,7 @@ st.sidebar.subheader("📊 Interactive Parameters")
 fast_ma = st.sidebar.number_input("Fast SMA Period (Default 10)", min_value=3, max_value=50, value=10)
 slow_ma = st.sidebar.number_input("Slow EMA Period (Default 30)", min_value=10, max_value=200, value=30)
 min_price = st.sidebar.number_input("Minimum Stock Price ($)", min_value=1.0, value=5.0, step=1.0)
-min_volume = st.sidebar.number_input("Min Average Volume (20-day)", min_value=10000, value=500000, step=100000)
+min_volume = st.sidebar.number_input("Min Volume (60-day EMA)", min_value=10000, value=300000, step=100000)
 
 # CHANGE: ADX is now a range slider
 adx_min, adx_max = st.sidebar.slider("ADX Strength Range", min_value=0, max_value=100, value=(25, 100), step=1)
@@ -159,11 +159,14 @@ use_prev_day = st.sidebar.checkbox("Scan on Previous Day's Close (Ignore Today's
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📈 Long-Term Trend")
-# CHANGE: Baseline filter updated to 30 SMA > 200 SMA
-require_200_sma = st.sidebar.checkbox("Require 30 SMA > 200 SMA (Baseline Filter)", value=True)
+# CHANGE: Baseline filter updated to Close > 200 SMA
+require_200_sma = st.sidebar.checkbox("Require Close > 200 SMA (Baseline Filter)", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🕯️ Candlestick Filters")
+
+# CHANGE: Added toggle for descending highs
+require_descending_highs = st.sidebar.checkbox("Require Descending Highs (3 Days)", value=False)
 
 # CHANGE: Added toggle for the basic green candle check
 require_green_candle = st.sidebar.checkbox("Require Green Candle (Close > Open)", value=True)
@@ -180,8 +183,9 @@ st.sidebar.info(
     f"- **Pullback:** Close is between {fast_ma} SMA and {slow_ma} EMA\n"
     f"- **Candle:** {', '.join(candlestick_filter) if candlestick_filter else ('Green Only' if require_green_candle else 'Any Candle')}\n"
     f"- **Strength:** 10-period ADX between {adx_min} and {adx_max}\n"
-    f"- **Baseline:** 30 SMA > 200 SMA (if checked)\n"
-    f"- **Filters:** Price > ${min_price}, Vol > {min_volume}"
+    f"- **Baseline:** Close > 200 SMA (if checked)\n"
+    f"- **Filters:** Price > ${min_price}, Vol > {min_volume}\n"
+    f"- **Descending Highs:** {'Yes' if require_descending_highs else 'No'}"
 )
 
 # ==========================================
@@ -250,9 +254,12 @@ with tab1:
                     # 1. Fast Filter: Check Price, Volume
                     latest_close = float(df_calc['Close'].iloc[-1])
                     latest_open = float(df_calc['Open'].iloc[-1])
-                    avg_vol = float(df_calc['Volume'].tail(20).mean())
+                    latest_high = float(df_calc['High'].iloc[-1])
+                    prev1_high = float(df_calc['High'].iloc[-2]) if len(df_calc) >= 2 else 0
+                    prev2_high = float(df_calc['High'].iloc[-3]) if len(df_calc) >= 3 else 0
+                    vol_ema = float(df_calc['Volume'].ewm(span=60, adjust=False).mean().iloc[-1])
                     
-                    if latest_close < min_price or avg_vol < min_volume:
+                    if latest_close < min_price or vol_ema < min_volume:
                         continue
                     
                     # 2. Calculate Indicators
@@ -278,11 +285,16 @@ with tab1:
                     # CHANGE: Use ADX min and max
                     strong_trend = adx_min <= adx_val <= adx_max
                     
-                    # CHANGE: Evaluate 30 SMA vs 200 SMA
-                    above_200 = sma_30 > sma_200
+                    # CHANGE: Evaluate Close vs 200 SMA
+                    above_200 = latest_close > sma_200
                     if require_200_sma and not above_200:
                         continue
                         
+                    # CHANGE: Evaluate Descending Highs
+                    if require_descending_highs:
+                        if not (latest_high < prev1_high and prev1_high < prev2_high):
+                            continue
+
                     # 4. Candlestick Pattern Checking
                     detected_patterns_str = detect_bullish_patterns(df_calc)
                     detected_list = [p.strip() for p in detected_patterns_str.split(",")] if detected_patterns_str != "None" else []
@@ -310,7 +322,10 @@ with tab1:
                             f"{fast_ma} SMA": round(sma_f, 2),
                             f"{slow_ma} EMA": round(ema_s, 2),
                             "ADX": round(adx_val, 2),
-                            "Avg Volume": f"{int(avg_vol):,}"
+                            "Volume 60 EMA": f"{int(vol_ema):,}",
+                            "Current High": round(latest_high, 2),
+                            "Prev 1 High": round(prev1_high, 2),
+                            "Prev 2 High": round(prev2_high, 2)
                         })
                 except Exception:
                     continue
@@ -318,7 +333,7 @@ with tab1:
         if results:
             results_df = pd.DataFrame(results)
             # Order columns nicely
-            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA", "ADX", "Avg Volume"]
+            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA", "ADX", "Volume 60 EMA", "Current High", "Prev 1 High", "Prev 2 High"]
             results_df = results_df[cols].sort_values(by="ADX", ascending=False).reset_index(drop=True)
             st.dataframe(results_df, use_container_width=True)
             st.success(f"Found {len(results_df)} setups out of {len(tickers_list)} scanned stocks.")
@@ -362,7 +377,7 @@ with tab2:
             setup_mask = setup_mask & (df_chart['Close'] > df_chart['Open'])
             
         if require_200_sma:
-            setup_mask = setup_mask & (df_chart['SMA_30'] > df_chart['SMA_200'])
+            setup_mask = setup_mask & (df_chart['Close'] > df_chart['SMA_200'])
             
         setup_dates = df_chart[setup_mask].index
         setup_prices = df_chart[setup_mask]['Low'] * 0.98 
