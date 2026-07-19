@@ -10,27 +10,33 @@ import io
 def calculate_adx(df, period=14):
     df = df.copy()
 
-    df['TR'] = pd.concat([
-        df['High'] - df['Low'],
-        abs(df['High'] - df['Close'].shift()),
-        abs(df['Low'] - df['Close'].shift())
+    high, low, close = df['High'], df['Low'], df['Close']
+
+    # True Range
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
     ], axis=1).max(axis=1)
 
-    df['+DM'] = (df['High'] - df['High'].shift()).clip(lower=0)
-    df['-DM'] = (df['Low'].shift() - df['Low']).clip(lower=0)
+    # Directional movement (compare the ORIGINAL moves, not mutated ones)
+    up_move = high - high.shift()
+    down_move = low.shift() - low
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
-    df['+DM'] = df['+DM'].where(df['+DM'] > df['-DM'], 0)
-    df['-DM'] = df['-DM'].where(df['-DM'] > df['+DM'], 0)
+    # Wilder's smoothing (RMA) = ewm with alpha = 1/period, adjust=False
+    alpha = 1 / period
+    atr = tr.ewm(alpha=alpha, adjust=False).mean()
+    plus_dm_s = plus_dm.ewm(alpha=alpha, adjust=False).mean()
+    minus_dm_s = minus_dm.ewm(alpha=alpha, adjust=False).mean()
 
-    tr_smooth = df['TR'].rolling(period).mean()
-    plus_dm_smooth = df['+DM'].rolling(period).mean()
-    minus_dm_smooth = df['-DM'].rolling(period).mean()
+    df['+DI'] = 100 * (plus_dm_s / atr)
+    df['-DI'] = 100 * (minus_dm_s / atr)
 
-    df['+DI'] = 100 * (plus_dm_smooth / tr_smooth)
-    df['-DI'] = 100 * (minus_dm_smooth / tr_smooth)
-
-    df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])) * 100
-    df['ADX'] = df['DX'].rolling(period).mean()
+    dx = 100 * (df['+DI'] - df['-DI']).abs() / (df['+DI'] + df['-DI'])
+    df['DX'] = dx
+    df['ADX'] = dx.ewm(alpha=alpha, adjust=False).mean()   # ADX is Wilder-smoothed too
 
     return df
 
