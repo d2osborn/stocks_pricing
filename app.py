@@ -90,7 +90,7 @@ st.title("Swing Trading & Pullback Screener 📈")
 # ==========================================
 # HELPER: FETCH ALL MARKET TICKERS (FTP FIX)
 # ==========================================
-@st.cache_data(ttl=86400) # Cache the ticker list for 24 hours
+@st.cache_data(ttl=86400) # Cache the ticker list for 24 hours (list rarely changes)
 def get_market_tickers():
     try:
         ftp = ftplib.FTP('ftp.nasdaqtrader.com')
@@ -197,7 +197,13 @@ st.sidebar.info(
 # ==========================================
 # DATA FETCHING
 # ==========================================
-@st.cache_data(ttl=3600) 
+# NOTE: The @st.cache_data(ttl=3600) decorator that used to sit here was the
+# cause of the "stale snapshot" problem. With it, clicking "Run Screener" within
+# an hour of the first run just replayed the earlier download instead of pulling
+# fresh bars after the close. Freshness is now controlled explicitly by the
+# button: each click performs a live download, and the result is held in
+# st.session_state so that adjusting parameters recalculates indicators without
+# re-downloading. Click "Run Screener" again whenever you want fresh data.
 def fetch_raw_data(tickers):
     start_date = datetime.date.today() - datetime.timedelta(days=400) 
     
@@ -212,7 +218,9 @@ def fetch_raw_data(tickers):
         my_bar.progress(progress, text=f"Fetching {ticker} ({i+1}/{total_tickers})...")
         
         try:
-            df = yf.download(ticker, start=start_date, progress=False)
+            # auto_adjust=False keeps raw OHLC; end defaults to now so the latest
+            # (finalized-after-close) daily bar is always included.
+            df = yf.download(ticker, start=start_date, progress=False, auto_adjust=False)
             
             if df.empty or len(df) < 200: 
                 continue
@@ -228,16 +236,42 @@ def fetch_raw_data(tickers):
     return raw_data_dict
 
 if st.sidebar.button("Run Screener"):
+    # Defensively clear any cached data layers so this is always a fresh pull.
+    st.cache_data.clear()
     st.session_state['raw_data'] = fetch_raw_data(tickers_list)
+    st.session_state['last_fetch_time'] = datetime.datetime.now()
 elif 'raw_data' not in st.session_state:
     st.session_state['raw_data'] = {}
     st.info("👈 Click **Run Screener** in the sidebar to download data and begin.")
 
 # ==========================================
+# FRESHNESS INDICATOR
+# ==========================================
+raw_data = st.session_state['raw_data']
+
+if raw_data:
+    fetch_time = st.session_state.get('last_fetch_time')
+
+    # Find the most recent bar date across everything we downloaded.
+    latest_bar_date = None
+    for _df in raw_data.values():
+        if not _df.empty:
+            d = _df.index[-1]
+            if latest_bar_date is None or d > latest_bar_date:
+                latest_bar_date = d
+
+    fetch_str = fetch_time.strftime("%Y-%m-%d %H:%M:%S") if fetch_time else "unknown"
+    bar_str = latest_bar_date.strftime("%Y-%m-%d") if latest_bar_date is not None else "n/a"
+    st.caption(
+        f"🕒 Data last downloaded: **{fetch_str}**  |  "
+        f"Most recent bar in dataset: **{bar_str}**  |  "
+        f"Re-click **Run Screener** to refresh."
+    )
+
+# ==========================================
 # TABS SETUP
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🔍 Pullback Screeners", "📊 Charting", "⏱️ Market Timing (Macro)"])
-raw_data = st.session_state['raw_data']
 
 # ==========================================
 # TAB 1: DYNAMIC PULLBACK SCREENER
@@ -426,7 +460,7 @@ with tab3:
     st.write("Using the Volatility Index (^VIX) to gauge overall market fear and greed.")
     
     try:
-        vix = yf.download("^VIX", period="1y", progress=False)
+        vix = yf.download("^VIX", period="1y", progress=False, auto_adjust=False)
         if isinstance(vix.columns, pd.MultiIndex): vix.columns = vix.columns.droplevel(1)
             
         vix['SMA_10'] = vix['Close'].rolling(window=10).mean()
