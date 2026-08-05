@@ -155,6 +155,13 @@ slow_ma = st.sidebar.number_input("Slow EMA Period (Default 30)", min_value=10, 
 min_price = st.sidebar.number_input("Minimum Stock Price ($)", min_value=1.0, value=5.0, step=1.0)
 min_volume = st.sidebar.number_input("Min Volume (60-day EMA)", min_value=10000, value=300000, step=100000)
 
+# NEW: directional day-over-day volume comparison
+volume_direction = st.sidebar.radio(
+    "Today's Volume vs Previous Day:",
+    ("Off", "Greater than previous day", "Less than previous day"),
+    index=0
+)
+
 # CHANGE: ADX is now a range slider
 adx_min, adx_max = st.sidebar.slider("ADX Strength Range", min_value=0, max_value=100, value=(25, 100), step=1)
 
@@ -191,7 +198,8 @@ st.sidebar.info(
     f"- **Strength:** 10-period ADX between {adx_min} and {adx_max}\n"
     f"- **Baseline:** Close > 200 SMA (if checked)\n"
     f"- **Filters:** Price > ${min_price}, Vol > {min_volume}\n"
-    f"- **Descending Highs:** {'Yes' if require_descending_highs else 'No'}"
+    f"- **Descending Highs:** {'Yes' if require_descending_highs else 'No'}\n"
+    f"- **Volume vs Prev Day:** {volume_direction}"
 )
 
 # ==========================================
@@ -298,10 +306,20 @@ with tab1:
                     prev1_high = float(df_calc['High'].iloc[-2]) if len(df_calc) >= 2 else 0
                     prev2_high = float(df_calc['High'].iloc[-3]) if len(df_calc) >= 3 else 0
                     vol_ema = float(df_calc['Volume'].ewm(span=60, adjust=False).mean().iloc[-1])
-                    
+
+                    # NEW: raw daily volumes for the day-over-day comparison
+                    latest_volume = float(df_calc['Volume'].iloc[-1])
+                    prev_volume = float(df_calc['Volume'].iloc[-2]) if len(df_calc) >= 2 else 0.0
+
                     if latest_close < min_price or vol_ema < min_volume:
                         continue
-                    
+
+                    # NEW: directional volume filter
+                    if volume_direction == "Greater than previous day" and not (latest_volume > prev_volume):
+                        continue
+                    if volume_direction == "Less than previous day" and not (latest_volume < prev_volume):
+                        continue
+
                     # 2. Calculate Indicators
                     df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
                     df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
@@ -363,6 +381,8 @@ with tab1:
                             f"{slow_ma} EMA": round(ema_s, 2),
                             "ADX": round(adx_val, 2),
                             "Volume 60 EMA": f"{int(vol_ema):,}",
+                            "Volume": f"{int(latest_volume):,}",
+                            "Prev Volume": f"{int(prev_volume):,}",
                             "Current High": round(latest_high, 2),
                             "Prev 1 High": round(prev1_high, 2),
                             "Prev 2 High": round(prev2_high, 2)
@@ -373,7 +393,9 @@ with tab1:
         if results:
             results_df = pd.DataFrame(results)
             # Order columns nicely
-            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA", "ADX", "Volume 60 EMA", "Current High", "Prev 1 High", "Prev 2 High"]
+            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA", "ADX",
+                    "Volume 60 EMA", "Volume", "Prev Volume",
+                    "Current High", "Prev 1 High", "Prev 2 High"]
             results_df = results_df[cols].sort_values(by="ADX", ascending=False).reset_index(drop=True)
             st.dataframe(results_df, use_container_width=True)
             st.success(f"Found {len(results_df)} setups out of {len(tickers_list)} scanned stocks.")
@@ -418,7 +440,13 @@ with tab2:
             
         if require_200_sma:
             setup_mask = setup_mask & (df_chart['Close'] > df_chart['SMA_200'])
-            
+
+        # NEW: mirror the volume filter on the chart markers
+        if volume_direction == "Greater than previous day":
+            setup_mask = setup_mask & (df_chart['Volume'] > df_chart['Volume'].shift(1))
+        elif volume_direction == "Less than previous day":
+            setup_mask = setup_mask & (df_chart['Volume'] < df_chart['Volume'].shift(1))
+
         setup_dates = df_chart[setup_mask].index
         setup_prices = df_chart[setup_mask]['Low'] * 0.98 
         
