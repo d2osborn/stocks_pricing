@@ -40,6 +40,62 @@ def calculate_adx(df, period=14):
 
     return df
 
+# ==========================================
+# WEEKLY TREND HELPERS
+# ==========================================
+def calculate_weekly_trend(df, fast_period=10, slow_period=30):
+    """
+    Resamples daily OHLCV bars into weekly bars (weeks ending Friday) and returns
+    the weekly fast SMA and weekly slow EMA as two Series indexed by week-ending date.
+
+    The final week is included even while it is still forming, which mirrors what
+    you would see on a live weekly chart. Returns (None, None) when there is not
+    enough weekly history to compute the requested periods.
+    """
+    if df is None or df.empty:
+        return None, None
+
+    needed = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+    if 'Close' not in needed:
+        return None, None
+
+    try:
+        weekly = df[needed].resample('W-FRI').agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last',
+            'Volume': 'sum'
+        }).dropna(subset=['Close'])
+    except Exception:
+        return None, None
+
+    if len(weekly) < max(fast_period, slow_period):
+        return None, None
+
+    w_sma = weekly['Close'].rolling(window=fast_period).mean()
+    w_ema = weekly['Close'].ewm(span=slow_period, adjust=False).mean()
+
+    return w_sma, w_ema
+
+
+def map_weekly_to_daily(weekly_series, daily_index):
+    """
+    Broadcasts a weekly Series back onto a daily index so weekly lines can be
+    drawn on the daily chart. Each daily bar receives its own week's value.
+    """
+    if weekly_series is None:
+        return pd.Series([float('nan')] * len(daily_index), index=daily_index)
+
+    try:
+        w = weekly_series.copy()
+        w.index = w.index.to_period('W-FRI')
+        mapped = w.reindex(daily_index.to_period('W-FRI'))
+        return pd.Series(mapped.values, index=daily_index)
+    except Exception:
+        return pd.Series([float('nan')] * len(daily_index), index=daily_index)
+
+
 def detect_bullish_patterns(df):
     """Detects 5 specific bullish candlestick patterns on the latest trading day."""
     if len(df) < 2:
@@ -170,6 +226,27 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("⏳ Timing Filters")
 use_prev_day = st.sidebar.checkbox("Scan on Previous Day's Close (Ignore Today's Live Data)", value=False)
 
+# ==========================================
+# NEW: TREND TIMEFRAME FILTERS (DAILY / WEEKLY)
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("📐 Trend Filters (Daily / Weekly)")
+
+require_daily_trend = st.sidebar.checkbox(
+    f"Require Daily Trend ({fast_ma} SMA > {slow_ma} EMA)", value=True
+)
+
+require_weekly_trend = st.sidebar.checkbox(
+    "Require Weekly Trend (Weekly SMA > Weekly EMA)", value=False
+)
+
+weekly_fast_ma = st.sidebar.number_input(
+    "Weekly Fast SMA Period (Default 10)", min_value=2, max_value=52, value=10
+)
+weekly_slow_ma = st.sidebar.number_input(
+    "Weekly Slow EMA Period (Default 30)", min_value=3, max_value=104, value=30
+)
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("📈 Long-Term Trend")
 # CHANGE: Baseline filter updated to Close > 200 SMA
@@ -192,7 +269,8 @@ candlestick_filter = st.sidebar.multiselect(
 st.sidebar.markdown("---")
 st.sidebar.info(
     f"**Current Screening Logic:**\n"
-    f"- **Trend:** {fast_ma} SMA > {slow_ma} EMA\n"
+    f"- **Daily Trend:** {f'{fast_ma} SMA > {slow_ma} EMA' if require_daily_trend else 'Off'}\n"
+    f"- **Weekly Trend:** {f'{weekly_fast_ma}W SMA > {weekly_slow_ma}W EMA' if require_weekly_trend else 'Off'}\n"
     f"- **Pullback:** Close is between {fast_ma} SMA and {slow_ma} EMA\n"
     f"- **Candle:** {', '.join(candlestick_filter) if candlestick_filter else ('Green Only' if require_green_candle else 'Any Candle')}\n"
     f"- **Strength:** 10-period ADX between {adx_min} and {adx_max}\n"
@@ -212,8 +290,13 @@ st.sidebar.info(
 # button: each click performs a live download, and the result is held in
 # st.session_state so that adjusting parameters recalculates indicators without
 # re-downloading. Click "Run Screener" again whenever you want fresh data.
+#
+# LOOKBACK NOTE: the window was widened from 400 to 800 calendar days purely so
+# the weekly filter has enough weekly bars (~114) for a 30-week EMA to be fully
+# converged. Every daily indicator here (200 SMA, 60-EMA volume, 30 EMA, 10 ADX)
+# was already fully converged at 400 days, so daily results are unchanged.
 def fetch_raw_data(tickers):
-    start_date = datetime.date.today() - datetime.timedelta(days=400) 
+    start_date = datetime.date.today() - datetime.timedelta(days=800)
     
     raw_data_dict = {}
     total_tickers = len(tickers)
@@ -320,6 +403,23 @@ with tab1:
                     if volume_direction == "Less than previous day" and not (latest_volume < prev_volume):
                         continue
 
+                    # NEW: Weekly trend (10W SMA vs 30W EMA by default)
+                    w_sma_series, w_ema_series = calculate_weekly_trend(
+                        df_calc, weekly_fast_ma, weekly_slow_ma
+                    )
+
+                    if (w_sma_series is None) or pd.isna(w_sma_series.iloc[-1]) or pd.isna(w_ema_series.iloc[-1]):
+                        w_sma_val = 0.0
+                        w_ema_val = 0.0
+                        weekly_uptrend = False
+                    else:
+                        w_sma_val = float(w_sma_series.iloc[-1])
+                        w_ema_val = float(w_ema_series.iloc[-1])
+                        weekly_uptrend = w_sma_val > w_ema_val
+
+                    if require_weekly_trend and not weekly_uptrend:
+                        continue
+
                     # 2. Calculate Indicators
                     df_calc['SMA_Fast'] = df_calc['Close'].rolling(window=fast_ma).mean()
                     df_calc['EMA_Slow'] = df_calc['Close'].ewm(span=slow_ma, adjust=False).mean()
@@ -339,6 +439,9 @@ with tab1:
                     # 3. Dynamic Logic Check
                     uptrend = sma_f > ema_s
                     in_taz = (latest_close < sma_f) and (latest_close > ema_s)
+                    
+                    # NEW: daily trend requirement is now its own toggle
+                    daily_trend_ok = uptrend if require_daily_trend else True
                     
                     # CHANGE: Use ADX min and max
                     strong_trend = adx_min <= adx_val <= adx_max
@@ -371,7 +474,7 @@ with tab1:
                         if not is_green:
                             passes_pattern_filter = False
                     
-                    if uptrend and in_taz and strong_trend and passes_pattern_filter:
+                    if daily_trend_ok and in_taz and strong_trend and passes_pattern_filter:
                         results.append({
                             "Ticker": ticker,
                             "Pattern": detected_patterns_str,
@@ -379,6 +482,9 @@ with tab1:
                             "Open": round(latest_open, 2),
                             f"{fast_ma} SMA": round(sma_f, 2),
                             f"{slow_ma} EMA": round(ema_s, 2),
+                            f"{weekly_fast_ma}W SMA": round(w_sma_val, 2),
+                            f"{weekly_slow_ma}W EMA": round(w_ema_val, 2),
+                            "Weekly Trend": "Up" if weekly_uptrend else "Down/NA",
                             "ADX": round(adx_val, 2),
                             "Volume 60 EMA": f"{int(vol_ema):,}",
                             "Volume": f"{int(latest_volume):,}",
@@ -393,9 +499,12 @@ with tab1:
         if results:
             results_df = pd.DataFrame(results)
             # Order columns nicely
-            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA", "ADX",
+            cols = ["Ticker", "Pattern", "Close", "Open", f"{fast_ma} SMA", f"{slow_ma} EMA",
+                    f"{weekly_fast_ma}W SMA", f"{weekly_slow_ma}W EMA", "Weekly Trend", "ADX",
                     "Volume 60 EMA", "Volume", "Prev Volume",
                     "Current High", "Prev 1 High", "Prev 2 High"]
+            # Guard against a duplicate label if daily and weekly periods collide in name
+            cols = list(dict.fromkeys([c for c in cols if c in results_df.columns]))
             results_df = results_df[cols].sort_values(by="ADX", ascending=False).reset_index(drop=True)
             st.dataframe(results_df, use_container_width=True)
             st.success(f"Found {len(results_df)} setups out of {len(tickers_list)} scanned stocks.")
@@ -423,17 +532,32 @@ with tab2:
         
         # Force ADX period to 10
         df_chart = calculate_adx(df_chart, period=10)
+
+        # NEW: weekly moving averages broadcast onto the daily index.
+        # Computed on the FULL history before the tail() so the weekly EMA is converged.
+        w_sma_chart, w_ema_chart = calculate_weekly_trend(
+            df_chart, weekly_fast_ma, weekly_slow_ma
+        )
+        df_chart['W_SMA_Fast'] = map_weekly_to_daily(w_sma_chart, df_chart.index)
+        df_chart['W_EMA_Slow'] = map_weekly_to_daily(w_ema_chart, df_chart.index)
             
         df_chart = df_chart.tail(150) 
         
         # CHANGE: Aligning setup_mask charting logic with the new filters
         setup_mask = (
-            (df_chart['SMA_Fast'] > df_chart['EMA_Slow']) & 
             (df_chart['Close'] < df_chart['SMA_Fast']) & 
             (df_chart['Close'] > df_chart['EMA_Slow']) & 
             (df_chart['ADX'] >= adx_min) & 
             (df_chart['ADX'] <= adx_max)
         )
+
+        # NEW: daily trend leg of the mask is now toggle-driven
+        if require_daily_trend:
+            setup_mask = setup_mask & (df_chart['SMA_Fast'] > df_chart['EMA_Slow'])
+
+        # NEW: mirror the weekly trend filter on the chart markers
+        if require_weekly_trend:
+            setup_mask = setup_mask & (df_chart['W_SMA_Fast'] > df_chart['W_EMA_Slow'])
         
         if require_green_candle and not candlestick_filter:
             setup_mask = setup_mask & (df_chart['Close'] > df_chart['Open'])
@@ -446,6 +570,8 @@ with tab2:
             setup_mask = setup_mask & (df_chart['Volume'] > df_chart['Volume'].shift(1))
         elif volume_direction == "Less than previous day":
             setup_mask = setup_mask & (df_chart['Volume'] < df_chart['Volume'].shift(1))
+
+        setup_mask = setup_mask.fillna(False)
 
         setup_dates = df_chart[setup_mask].index
         setup_prices = df_chart[setup_mask]['Low'] * 0.98 
@@ -464,6 +590,18 @@ with tab2:
         
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_Fast'], line=dict(color='blue', width=1.5), name=f'{fast_ma} SMA'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA_Slow'], line=dict(color='red', width=1.5), name=f'{slow_ma} EMA'), row=1, col=1)
+        
+        # NEW: weekly moving averages drawn as stepped lines on the daily chart
+        fig.add_trace(go.Scatter(
+            x=df_chart.index, y=df_chart['W_SMA_Fast'],
+            line=dict(color='#00B4D8', width=1.5, shape='hv'),
+            name=f'{weekly_fast_ma}W SMA'
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_chart.index, y=df_chart['W_EMA_Slow'],
+            line=dict(color='#C1121F', width=1.5, shape='hv'),
+            name=f'{weekly_slow_ma}W EMA'
+        ), row=1, col=1)
         
         # Adding 30 SMA to the chart so you can visualize the baseline cross
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_30'], line=dict(color='#8A2BE2', width=1, dash='dot'), name='30 SMA Baseline'), row=1, col=1)
